@@ -21,13 +21,12 @@ package org.elasticsearch.discovery.ec2;
 
 
 import org.elasticsearch.action.admin.cluster.settings.ClusterUpdateSettingsResponse;
-import org.elasticsearch.cloud.aws.AbstractAwsTestCase;
+import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.plugin.discovery.ec2.Ec2DiscoveryPlugin;
+import org.elasticsearch.discovery.DiscoveryModule;
 import org.elasticsearch.test.ESIntegTestCase.ClusterScope;
 import org.elasticsearch.test.ESIntegTestCase.Scope;
 
-import static org.elasticsearch.common.settings.Settings.settingsBuilder;
 import static org.hamcrest.CoreMatchers.is;
 
 /**
@@ -35,23 +34,22 @@ import static org.hamcrest.CoreMatchers.is;
  * starting.
  * This test requires AWS to run.
  */
-@ClusterScope(scope = Scope.TEST, numDataNodes = 0, numClientNodes = 0, transportClientRatio = 0.0)
+@ClusterScope(scope = Scope.TEST, numDataNodes = 0, numClientNodes = 0)
 public class Ec2DiscoveryUpdateSettingsTests extends AbstractAwsTestCase {
     public void testMinimumMasterNodesStart() {
-        Settings nodeSettings = settingsBuilder()
-                .put("plugin.types", Ec2DiscoveryPlugin.class.getName())
-                .put("cloud.enabled", true)
-                .put("discovery.type", "ec2")
+        Settings nodeSettings = Settings.builder()
+                .put(DiscoveryModule.DISCOVERY_SEED_PROVIDERS_SETTING.getKey(), "ec2")
                 .build();
         internalCluster().startNode(nodeSettings);
 
-        // We try to update minimum_master_nodes now
-        ClusterUpdateSettingsResponse response = client().admin().cluster().prepareUpdateSettings()
-                .setPersistentSettings(settingsBuilder().put("discovery.zen.minimum_master_nodes", 1))
-                .setTransientSettings(settingsBuilder().put("discovery.zen.minimum_master_nodes", 1))
+        // We try to update a setting now
+        final String expectedValue = UUIDs.randomBase64UUID(random());
+        final String settingName = "cluster.routing.allocation.exclude.any_attribute";
+        final ClusterUpdateSettingsResponse response = client().admin().cluster().prepareUpdateSettings()
+                .setPersistentSettings(Settings.builder().put(settingName, expectedValue))
                 .get();
 
-        Integer min = response.getPersistentSettings().getAsInt("discovery.zen.minimum_master_nodes", null);
-        assertThat(min, is(1));
+        final String value = response.getPersistentSettings().get(settingName);
+        assertThat(value, is(expectedValue));
     }
 }

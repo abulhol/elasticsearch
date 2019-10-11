@@ -23,12 +23,6 @@ esplugin {
 }
 
 dependencies {
-  compile "com.github.spullara.mustache.java:compiler:0.9.1"
+  compile "com.github.spullara.mustache.java:compiler:0.9.6"
 }
 
-integTest {
-  cluster {
-    systemProperty 'es.script.inline', 'true'
-    systemProperty 'es.script.indexed', 'true'
-  }
-}

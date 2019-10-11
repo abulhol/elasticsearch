@@ -19,55 +19,49 @@
 
 package org.elasticsearch.test.store;
 
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Setting;
+import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.settings.SettingsModule;
 import org.elasticsearch.index.IndexModule;
-import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.shard.IndexEventListener;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.IndexShardState;
 import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.index.shard.ShardPath;
-import org.elasticsearch.index.store.DirectoryService;
-import org.elasticsearch.index.store.IndexStore;
-import org.elasticsearch.index.store.IndexStoreConfig;
+import org.elasticsearch.plugins.IndexStorePlugin;
 import org.elasticsearch.plugins.Plugin;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 
-public class MockFSIndexStore extends IndexStore {
+public final class MockFSIndexStore {
 
-    public static final Setting<Boolean> INDEX_CHECK_INDEX_ON_CLOSE_SETTING = Setting.boolSetting("index.store.mock.check_index_on_close", true, false, Setting.Scope.INDEX);
+    public static final Setting<Boolean> INDEX_CHECK_INDEX_ON_CLOSE_SETTING =
+        Setting.boolSetting("index.store.mock.check_index_on_close", true, Property.IndexScope, Property.NodeScope);
 
-    public static class TestPlugin extends Plugin {
-        @Override
-        public String name() {
-            return "mock-index-store";
-        }
-        @Override
-        public String description() {
-            return "a mock index store for testing";
-        }
+    public static class TestPlugin extends Plugin implements IndexStorePlugin {
         @Override
         public Settings additionalSettings() {
             return Settings.builder().put(IndexModule.INDEX_STORE_TYPE_SETTING.getKey(), "mock").build();
         }
 
-        public void onModule(SettingsModule module) {
+        @Override
+        public List<Setting<?>> getSettings() {
+            return Arrays.asList(INDEX_CHECK_INDEX_ON_CLOSE_SETTING,
+            MockFSDirectoryFactory.CRASH_INDEX_SETTING,
+            MockFSDirectoryFactory.RANDOM_IO_EXCEPTION_RATE_SETTING,
+            MockFSDirectoryFactory.RANDOM_IO_EXCEPTION_RATE_ON_OPEN_SETTING);
+        }
 
-            module.registerSetting(INDEX_CHECK_INDEX_ON_CLOSE_SETTING);
-            module.registerSetting(MockFSDirectoryService.CRASH_INDEX_SETTING);
-            module.registerSetting(MockFSDirectoryService.RANDOM_IO_EXCEPTION_RATE_SETTING);
-            module.registerSetting(MockFSDirectoryService.RANDOM_PREVENT_DOUBLE_WRITE_SETTING);
-            module.registerSetting(MockFSDirectoryService.RANDOM_NO_DELETE_OPEN_FILE_SETTING);
-            module.registerSetting(MockFSDirectoryService.RANDOM_IO_EXCEPTION_RATE_ON_OPEN_SETTING);
+        @Override
+        public Map<String, DirectoryFactory> getDirectoryFactories() {
+            return Collections.singletonMap("mock", new MockFSDirectoryFactory());
         }
 
         @Override
@@ -77,22 +71,12 @@ public class MockFSIndexStore extends IndexStore {
                 if (INDEX_CHECK_INDEX_ON_CLOSE_SETTING.get(indexSettings)) {
                     indexModule.addIndexEventListener(new Listener());
                 }
-                indexModule.addIndexStore("mock", MockFSIndexStore::new);
             }
         }
     }
 
-    MockFSIndexStore(IndexSettings indexSettings,
-                     IndexStoreConfig config) {
-        super(indexSettings, config);
-    }
-
-    public DirectoryService newDirectoryService(ShardPath path) {
-        return new MockFSDirectoryService(indexSettings, this, path);
-    }
-
     private static final EnumSet<IndexShardState> validCheckIndexStates = EnumSet.of(
-            IndexShardState.STARTED, IndexShardState.RELOCATED, IndexShardState.POST_RECOVERY
+            IndexShardState.STARTED, IndexShardState.POST_RECOVERY
     );
     private static final class Listener implements IndexEventListener {
 
@@ -102,19 +86,19 @@ public class MockFSIndexStore extends IndexStore {
             if (indexShard != null) {
                 Boolean remove = shardSet.remove(indexShard);
                 if (remove == Boolean.TRUE) {
-                    ESLogger logger = Loggers.getLogger(getClass(), indexShard.indexSettings().getSettings(), indexShard.shardId());
-                    MockFSDirectoryService.checkIndex(logger, indexShard.store(), indexShard.shardId());
+                    Logger logger = Loggers.getLogger(getClass(), indexShard.shardId());
+                    MockFSDirectoryFactory.checkIndex(logger, indexShard.store(), indexShard.shardId());
                 }
             }
         }
 
         @Override
-        public void indexShardStateChanged(IndexShard indexShard, @Nullable IndexShardState previousState, IndexShardState currentState, @Nullable String reason) {
-            if (currentState == IndexShardState.CLOSED && validCheckIndexStates.contains(previousState) && indexShard.indexSettings().isOnSharedFilesystem() == false) {
+        public void indexShardStateChanged(IndexShard indexShard, @Nullable IndexShardState previousState,
+                IndexShardState currentState, @Nullable String reason) {
+            if (currentState == IndexShardState.CLOSED && validCheckIndexStates.contains(previousState)) {
                shardSet.put(indexShard, Boolean.TRUE);
             }
 
         }
     }
-
 }

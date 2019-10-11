@@ -23,12 +23,19 @@ import java.io.IOException;
 import java.nio.file.Path;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
-import org.elasticsearch.index.store.SmbDirectoryWrapper;
 
-public class SmbMMapDirectoryTests extends ESBaseDirectoryTestCase {
+public class SmbMMapDirectoryTests extends EsBaseDirectoryTestCase {
 
     @Override
     protected Directory getDirectory(Path file) throws IOException {
         return new SmbDirectoryWrapper(new MMapDirectory(file));
+    }
+
+    @Override
+    public void testCreateOutputForExistingFile() throws IOException {
+        /**
+         * This test is disabled because {@link SmbDirectoryWrapper} opens existing file
+         * with an explicit StandardOpenOption.TRUNCATE_EXISTING option.
+         */
     }
 }

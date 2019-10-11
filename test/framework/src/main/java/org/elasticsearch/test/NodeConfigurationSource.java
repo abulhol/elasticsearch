@@ -19,29 +19,22 @@
 package org.elasticsearch.test;
 
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.index.MockEngineFactoryPlugin;
-import org.elasticsearch.node.NodeMocksPlugin;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.search.MockSearchService;
-import org.elasticsearch.test.store.MockFSIndexStore;
-import org.elasticsearch.test.transport.AssertingLocalTransport;
-import org.elasticsearch.test.transport.MockTransportService;
 
-import java.util.ArrayList;
+import java.nio.file.Path;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.List;
 
 public abstract class NodeConfigurationSource {
 
     public static final NodeConfigurationSource EMPTY = new NodeConfigurationSource() {
         @Override
         public Settings nodeSettings(int nodeOrdinal) {
-            return null;
+            return Settings.EMPTY;
         }
 
         @Override
-        public Settings transportClientSettings() {
+        public Path nodeConfigPath(int nodeOrdinal) {
             return null;
         }
     };
@@ -51,16 +44,10 @@ public abstract class NodeConfigurationSource {
      */
     public abstract Settings nodeSettings(int nodeOrdinal);
 
+    public abstract Path nodeConfigPath(int nodeOrdinal);
+
     /** Returns plugins that should be loaded on the node */
     public Collection<Class<? extends Plugin>> nodePlugins() {
         return Collections.emptyList();
     }
-
-    public abstract Settings transportClientSettings();
-
-    /** Returns plugins that should be loaded in the transport client */
-    public Collection<Class<? extends Plugin>> transportClientPlugins() {
-        return Collections.emptyList();
-    }
-
 }

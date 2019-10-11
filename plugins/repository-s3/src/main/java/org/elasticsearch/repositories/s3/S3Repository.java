@@ -19,24 +19,22 @@
 
 package org.elasticsearch.repositories.s3;
 
-import org.elasticsearch.cloud.aws.AwsS3Service;
-import org.elasticsearch.cloud.aws.AwsS3Service.CLOUD_AWS;
-import org.elasticsearch.cloud.aws.AwsS3Service.REPOSITORY_S3;
-import org.elasticsearch.cloud.aws.blobstore.S3BlobStore;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.cluster.metadata.RepositoryMetaData;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.blobstore.BlobPath;
 import org.elasticsearch.common.blobstore.BlobStore;
-import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
-import org.elasticsearch.index.snapshots.IndexShardRepository;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.monitor.jvm.JvmInfo;
 import org.elasticsearch.repositories.RepositoryException;
-import org.elasticsearch.repositories.RepositoryName;
-import org.elasticsearch.repositories.RepositorySettings;
 import org.elasticsearch.repositories.blobstore.BlobStoreRepository;
+import org.elasticsearch.threadpool.ThreadPool;
 
-import java.io.IOException;
-import java.util.Locale;
+import java.util.function.Function;
 
 /**
  * Shared file system implementation of the BlobStoreRepository
@@ -44,131 +42,172 @@ import java.util.Locale;
  * Shared file system repository supports the following settings
  * <dl>
  * <dt>{@code bucket}</dt><dd>S3 bucket</dd>
- * <dt>{@code region}</dt><dd>S3 region. Defaults to us-east</dd>
  * <dt>{@code base_path}</dt><dd>Specifies the path within bucket to repository data. Defaults to root directory.</dd>
  * <dt>{@code concurrent_streams}</dt><dd>Number of concurrent read/write stream (per repository on each node). Defaults to 5.</dd>
- * <dt>{@code chunk_size}</dt><dd>Large file can be divided into chunks. This parameter specifies the chunk size. Defaults to not chucked.</dd>
+ * <dt>{@code chunk_size}</dt>
+ * <dd>Large file can be divided into chunks. This parameter specifies the chunk size. Defaults to not chucked.</dd>
  * <dt>{@code compress}</dt><dd>If set to true metadata files will be stored compressed. Defaults to false.</dd>
  * </dl>
  */
-public class S3Repository extends BlobStoreRepository {
+class S3Repository extends BlobStoreRepository {
+    private static final Logger logger = LogManager.getLogger(S3Repository.class);
 
-    public final static String TYPE = "s3";
-
-    private final S3BlobStore blobStore;
-
-    private final BlobPath basePath;
-
-    private ByteSizeValue chunkSize;
-
-    private boolean compress;
+    static final String TYPE = "s3";
 
     /**
-     * Constructs new shared file system repository
-     *
-     * @param name                 repository name
-     * @param repositorySettings   repository settings
-     * @param indexShardRepository index shard repository
-     * @param s3Service            S3 service
+     * Default is to use 100MB (S3 defaults) for heaps above 2GB and 5% of
+     * the available memory for smaller heaps.
      */
-    @Inject
-    public S3Repository(RepositoryName name, RepositorySettings repositorySettings, IndexShardRepository indexShardRepository, AwsS3Service s3Service) throws IOException {
-        super(name.getName(), repositorySettings, indexShardRepository);
+    private static final ByteSizeValue DEFAULT_BUFFER_SIZE = new ByteSizeValue(
+        Math.max(
+            ByteSizeUnit.MB.toBytes(5), // minimum value
+            Math.min(
+                ByteSizeUnit.MB.toBytes(100),
+                JvmInfo.jvmInfo().getMem().getHeapMax().getBytes() / 20)),
+        ByteSizeUnit.BYTES);
 
-        String bucket = repositorySettings.settings().get("bucket", settings.get(REPOSITORY_S3.BUCKET));
-        if (bucket == null) {
-            throw new RepositoryException(name.name(), "No bucket defined for s3 gateway");
-        }
 
-        String endpoint = repositorySettings.settings().get("endpoint", settings.get(REPOSITORY_S3.ENDPOINT));
-        String protocol = repositorySettings.settings().get("protocol", settings.get(REPOSITORY_S3.PROTOCOL));
+    static final Setting<String> BUCKET_SETTING = Setting.simpleString("bucket");
 
-        String region = repositorySettings.settings().get("region", settings.get(REPOSITORY_S3.REGION));
-        if (region == null) {
-            // InternalBucket setting is not set - use global region setting
-            String regionSetting = settings.get(CLOUD_AWS.REGION);
-            if (regionSetting != null) {
-                regionSetting = regionSetting.toLowerCase(Locale.ENGLISH);
-                if ("us-east".equals(regionSetting) || "us-east-1".equals(regionSetting)) {
-                    // Default bucket - setting region to null
-                    region = null;
-                } else if ("us-west".equals(regionSetting) || "us-west-1".equals(regionSetting)) {
-                    region = "us-west-1";
-                } else if ("us-west-2".equals(regionSetting)) {
-                    region = "us-west-2";
-                } else if ("ap-southeast".equals(regionSetting) || "ap-southeast-1".equals(regionSetting)) {
-                    region = "ap-southeast-1";
-                } else if ("ap-southeast-2".equals(regionSetting)) {
-                    region = "ap-southeast-2";
-                } else if ("ap-northeast".equals(regionSetting) || "ap-northeast-1".equals(regionSetting)) {
-                    region = "ap-northeast-1";
-                } else if ("eu-west".equals(regionSetting) || "eu-west-1".equals(regionSetting)) {
-                    region = "eu-west-1";
-                } else if ("eu-central".equals(regionSetting) || "eu-central-1".equals(regionSetting)) {
-                    region = "eu-central-1";
-                } else if ("sa-east".equals(regionSetting) || "sa-east-1".equals(regionSetting)) {
-                    region = "sa-east-1";
-                } else if ("cn-north".equals(regionSetting) || "cn-north-1".equals(regionSetting)) {
-                    region = "cn-north-1";
-                }
-            }
-        }
+    /**
+     * When set to true files are encrypted on server side using AES256 algorithm.
+     * Defaults to false.
+     */
+    static final Setting<Boolean> SERVER_SIDE_ENCRYPTION_SETTING = Setting.boolSetting("server_side_encryption", false);
 
-        boolean serverSideEncryption = repositorySettings.settings().getAsBoolean("server_side_encryption", settings.getAsBoolean(REPOSITORY_S3.SERVER_SIDE_ENCRYPTION, false));
-        ByteSizeValue bufferSize = repositorySettings.settings().getAsBytesSize("buffer_size", settings.getAsBytesSize(REPOSITORY_S3.BUFFER_SIZE, null));
-        Integer maxRetries = repositorySettings.settings().getAsInt("max_retries", settings.getAsInt(REPOSITORY_S3.MAX_RETRIES, 3));
-        this.chunkSize = repositorySettings.settings().getAsBytesSize("chunk_size", settings.getAsBytesSize(REPOSITORY_S3.CHUNK_SIZE, new ByteSizeValue(100, ByteSizeUnit.MB)));
-        this.compress = repositorySettings.settings().getAsBoolean("compress", settings.getAsBoolean(REPOSITORY_S3.COMPRESS, false));
+    /**
+     * Maximum size of files that can be uploaded using a single upload request.
+     */
+    static final ByteSizeValue MAX_FILE_SIZE = new ByteSizeValue(5, ByteSizeUnit.GB);
+
+    /**
+     * Minimum size of parts that can be uploaded using the Multipart Upload API.
+     * (see http://docs.aws.amazon.com/AmazonS3/latest/dev/qfacts.html)
+     */
+    static final ByteSizeValue MIN_PART_SIZE_USING_MULTIPART = new ByteSizeValue(5, ByteSizeUnit.MB);
+
+    /**
+     * Maximum size of parts that can be uploaded using the Multipart Upload API.
+     * (see http://docs.aws.amazon.com/AmazonS3/latest/dev/qfacts.html)
+     */
+    static final ByteSizeValue MAX_PART_SIZE_USING_MULTIPART = MAX_FILE_SIZE;
+
+    /**
+     * Maximum size of files that can be uploaded using the Multipart Upload API.
+     */
+    static final ByteSizeValue MAX_FILE_SIZE_USING_MULTIPART = new ByteSizeValue(5, ByteSizeUnit.TB);
+
+    /**
+     * Minimum threshold below which the chunk is uploaded using a single request. Beyond this threshold,
+     * the S3 repository will use the AWS Multipart Upload API to split the chunk into several parts, each of buffer_size length, and
+     * to upload each part in its own request. Note that setting a buffer size lower than 5mb is not allowed since it will prevents the
+     * use of the Multipart API and may result in upload errors. Defaults to the minimum between 100MB and 5% of the heap size.
+     */
+    static final Setting<ByteSizeValue> BUFFER_SIZE_SETTING =
+        Setting.byteSizeSetting("buffer_size", DEFAULT_BUFFER_SIZE, MIN_PART_SIZE_USING_MULTIPART, MAX_PART_SIZE_USING_MULTIPART);
+
+    /**
+     * Big files can be broken down into chunks during snapshotting if needed. Defaults to 1g.
+     */
+    static final Setting<ByteSizeValue> CHUNK_SIZE_SETTING = Setting.byteSizeSetting("chunk_size", new ByteSizeValue(1, ByteSizeUnit.GB),
+            new ByteSizeValue(5, ByteSizeUnit.MB), new ByteSizeValue(5, ByteSizeUnit.TB));
+
+    /**
+     * Sets the S3 storage class type for the backup files. Values may be standard, reduced_redundancy,
+     * standard_ia, onezone_ia and intelligent_tiering. Defaults to standard.
+     */
+    static final Setting<String> STORAGE_CLASS_SETTING = Setting.simpleString("storage_class");
+
+    /**
+     * The S3 repository supports all S3 canned ACLs : private, public-read, public-read-write,
+     * authenticated-read, log-delivery-write, bucket-owner-read, bucket-owner-full-control. Defaults to private.
+     */
+    static final Setting<String> CANNED_ACL_SETTING = Setting.simpleString("canned_acl");
+
+    static final Setting<String> CLIENT_NAME = new Setting<>("client", "default", Function.identity());
+
+    /**
+     * Specifies the path within bucket to repository data. Defaults to root directory.
+     */
+    static final Setting<String> BASE_PATH_SETTING = Setting.simpleString("base_path");
+
+    private final S3Service service;
+
+    private final String bucket;
+
+    private final ByteSizeValue bufferSize;
+
+    private final ByteSizeValue chunkSize;
+
+    private final boolean serverSideEncryption;
+
+    private final String storageClass;
+
+    private final String cannedACL;
+
+    /**
+     * Constructs an s3 backed repository
+     */
+    S3Repository(
+        final RepositoryMetaData metadata,
+        final NamedXContentRegistry namedXContentRegistry,
+        final S3Service service,
+        final ThreadPool threadPool) {
+        super(metadata, namedXContentRegistry, threadPool, buildBasePath(metadata));
+        this.service = service;
 
         // Parse and validate the user's S3 Storage Class setting
-        String storageClass = repositorySettings.settings().get("storage_class", settings.get(REPOSITORY_S3.STORAGE_CLASS, null));
-        String cannedACL = repositorySettings.settings().get("canned_acl", settings.get(REPOSITORY_S3.CANNED_ACL, null));
+        this.bucket = BUCKET_SETTING.get(metadata.settings());
+        if (bucket == null) {
+            throw new RepositoryException(metadata.name(), "No bucket defined for s3 repository");
+        }
 
-        logger.debug("using bucket [{}], region [{}], endpoint [{}], protocol [{}], chunk_size [{}], server_side_encryption [{}], buffer_size [{}], max_retries [{}], cannedACL [{}], storageClass [{}]",
-                bucket, region, endpoint, protocol, chunkSize, serverSideEncryption, bufferSize, maxRetries, cannedACL, storageClass);
+        this.bufferSize = BUFFER_SIZE_SETTING.get(metadata.settings());
+        this.chunkSize = CHUNK_SIZE_SETTING.get(metadata.settings());
 
-        blobStore = new S3BlobStore(settings, s3Service.client(endpoint, protocol, region, repositorySettings.settings().get("access_key"), repositorySettings.settings().get("secret_key"), maxRetries),
-                bucket, region, serverSideEncryption, bufferSize, maxRetries, cannedACL, storageClass);
+        // We make sure that chunkSize is bigger or equal than/to bufferSize
+        if (this.chunkSize.getBytes() < bufferSize.getBytes()) {
+            throw new RepositoryException(metadata.name(), CHUNK_SIZE_SETTING.getKey() + " (" + this.chunkSize +
+                ") can't be lower than " + BUFFER_SIZE_SETTING.getKey() + " (" + bufferSize + ").");
+        }
 
-        String basePath = repositorySettings.settings().get("base_path", settings.get(REPOSITORY_S3.BASE_PATH));
+        this.serverSideEncryption = SERVER_SIDE_ENCRYPTION_SETTING.get(metadata.settings());
+
+        this.storageClass = STORAGE_CLASS_SETTING.get(metadata.settings());
+        this.cannedACL = CANNED_ACL_SETTING.get(metadata.settings());
+
+        logger.debug(
+                "using bucket [{}], chunk_size [{}], server_side_encryption [{}], buffer_size [{}], cannedACL [{}], storageClass [{}]",
+                bucket,
+                chunkSize,
+                serverSideEncryption,
+                bufferSize,
+                cannedACL,
+                storageClass);
+    }
+
+    private static BlobPath buildBasePath(RepositoryMetaData metadata) {
+        final String basePath = BASE_PATH_SETTING.get(metadata.settings());
         if (Strings.hasLength(basePath)) {
-            BlobPath path = new BlobPath();
-            for(String elem : Strings.splitStringToArray(basePath, '/')) {
-                path = path.add(elem);
-            }
-            this.basePath = path;
+            return new BlobPath().add(basePath);
         } else {
-            this.basePath = BlobPath.cleanPath();
+            return BlobPath.cleanPath();
         }
     }
 
-    /**
-     * {@inheritDoc}
-     */
     @Override
-    protected BlobStore blobStore() {
-        return blobStore;
+    protected S3BlobStore createBlobStore() {
+        return new S3BlobStore(service, bucket, serverSideEncryption, bufferSize, cannedACL, storageClass, metadata);
     }
 
+    // only use for testing
     @Override
-    protected BlobPath basePath() {
-        return basePath;
+    protected BlobStore getBlobStore() {
+        return super.getBlobStore();
     }
 
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    protected boolean isCompress() {
-        return compress;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
     @Override
     protected ByteSizeValue chunkSize() {
         return chunkSize;
     }
-
 }

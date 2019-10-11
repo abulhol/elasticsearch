@@ -18,80 +18,88 @@
  */
 package org.elasticsearch.gradle.test
 
-import com.carrotsearch.gradle.junit4.RandomizedTestingTask
-import org.elasticsearch.gradle.BuildPlugin
+import org.elasticsearch.gradle.VersionProperties
+import org.elasticsearch.gradle.testclusters.ElasticsearchCluster
+import org.elasticsearch.gradle.testclusters.RestTestRunnerTask
+import org.elasticsearch.gradle.tool.Boilerplate
+import org.elasticsearch.gradle.tool.ClasspathUtils
+import org.gradle.api.DefaultTask
 import org.gradle.api.Task
-import org.gradle.api.internal.tasks.options.Option
-import org.gradle.api.plugins.JavaBasePlugin
+import org.gradle.api.file.FileCopyDetails
+import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Input
-import org.gradle.util.ConfigureUtil
-
+import org.gradle.api.tasks.testing.Test
+import org.gradle.plugins.ide.idea.IdeaPlugin
 /**
- * Runs integration tests, but first starts an ES cluster,
- * and passes the ES cluster info as parameters to the tests.
+ * A wrapper task around setting up a cluster and running rest tests.
  */
-public class RestIntegTestTask extends RandomizedTestingTask {
+class RestIntegTestTask extends DefaultTask {
 
-    ClusterConfiguration clusterConfig = new ClusterConfiguration()
+    protected Test runner
 
     /** Flag indicating whether the rest tests in the rest spec should be run. */
     @Input
-    boolean includePackaged = false
+    Boolean includePackaged = false
 
-    public RestIntegTestTask() {
-        description = 'Runs rest tests against an elasticsearch cluster.'
-        group = JavaBasePlugin.VERIFICATION_GROUP
-        dependsOn(project.testClasses)
-        classpath = project.sourceSets.test.runtimeClasspath
-        testClassesDir = project.sourceSets.test.output.classesDir
+    RestIntegTestTask() {
+        runner = project.tasks.create("${name}Runner", RestTestRunnerTask.class)
+        super.dependsOn(runner)
 
-        // start with the common test configuration
-        configure(BuildPlugin.commonTestConfig(project))
-        // override/add more for rest tests
-        parallelism = '1'
-        include('**/*IT.class')
-        systemProperty('tests.rest.load_packaged', 'false')
-
-        // copy the rest spec/tests into the test resources
-        RestSpecHack.configureDependencies(project)
-        project.afterEvaluate {
-            dependsOn(RestSpecHack.configureTask(project, includePackaged))
+        project.testClusters {
+                "$name" {
+                    javaHome = project.file(project.ext.runtimeJavaHome)
+                }
         }
+        runner.useCluster project.testClusters."$name"
+
+        runner.include('**/*IT.class')
+        runner.systemProperty('tests.rest.load_packaged', 'false')
+
+        if (System.getProperty("tests.rest.cluster") == null) {
+            if (System.getProperty("tests.cluster") != null || System.getProperty("tests.clustername") != null) {
+                throw new IllegalArgumentException("tests.rest.cluster, tests.cluster, and tests.clustername must all be null or non-null")
+            }
+
+            ElasticsearchCluster cluster = project.testClusters."${name}"
+            runner.nonInputProperties.systemProperty('tests.rest.cluster', "${-> cluster.allHttpSocketURI.join(",")}")
+            runner.nonInputProperties.systemProperty('tests.cluster', "${-> cluster.transportPortURI}")
+            runner.nonInputProperties.systemProperty('tests.clustername', "${-> cluster.getName()}")
+        } else {
+            if (System.getProperty("tests.cluster") == null || System.getProperty("tests.clustername") == null) {
+                throw new IllegalArgumentException("tests.rest.cluster, tests.cluster, and tests.clustername must all be null or non-null")
+            }
+            // an external cluster was specified and all responsibility for cluster configuration is taken by the user
+            runner.systemProperty('tests.rest.cluster', System.getProperty("tests.rest.cluster"))
+            runner.systemProperty('test.cluster', System.getProperty("tests.cluster"))
+            runner.systemProperty('test.clustername', System.getProperty("tests.clustername"))
+        }
+
+        // copy the rest spec/tests onto the test classpath
+        Copy copyRestSpec = createCopyRestSpecTask()
+        project.sourceSets.test.output.builtBy(copyRestSpec)
+
         // this must run after all projects have been configured, so we know any project
         // references can be accessed as a fully configured
         project.gradle.projectsEvaluated {
-            NodeInfo node = ClusterFormationTasks.setup(project, this, clusterConfig)
-            systemProperty('tests.rest.cluster', "${-> node.httpUri()}")
-            // TODO: our "client" qa tests currently use the rest-test plugin. instead they should have their own plugin
-            // that sets up the test cluster and passes this transport uri instead of http uri. Until then, we pass
-            // both as separate sysprops
-            systemProperty('tests.cluster', "${-> node.transportUri()}")
+            if (enabled == false) {
+                runner.enabled = false
+                return // no need to add cluster formation tasks if the task won't run!
+            }
         }
     }
 
-    @Option(
-        option = "debug-jvm",
-        description = "Enable debugging configuration, to allow attaching a debugger to elasticsearch."
-    )
-    public void setDebug(boolean enabled) {
-        clusterConfig.debug = enabled;
+    /** Sets the includePackaged property */
+    public void includePackaged(boolean include) {
+        includePackaged = include
     }
 
-    @Input
-    public void cluster(Closure closure) {
-        ConfigureUtil.configure(closure, clusterConfig)
-    }
-
-    public ClusterConfiguration getCluster() {
-        return clusterConfig
-    }
 
     @Override
     public Task dependsOn(Object... dependencies) {
-        super.dependsOn(dependencies)
+        runner.dependsOn(dependencies)
         for (Object dependency : dependencies) {
             if (dependency instanceof Fixture) {
-                finalizedBy(((Fixture)dependency).stopTask)
+                runner.finalizedBy(((Fixture) dependency).getStopTask())
             }
         }
         return this
@@ -99,10 +107,48 @@ public class RestIntegTestTask extends RandomizedTestingTask {
 
     @Override
     public void setDependsOn(Iterable<?> dependencies) {
-        super.setDependsOn(dependencies)
+        runner.setDependsOn(dependencies)
         for (Object dependency : dependencies) {
             if (dependency instanceof Fixture) {
-                finalizedBy(((Fixture)dependency).stopTask)
+                runner.finalizedBy(((Fixture) dependency).getStopTask())
+            }
+        }
+    }
+
+    public void runner(Closure configure) {
+        project.tasks.getByName("${name}Runner").configure(configure)
+    }
+
+    Copy createCopyRestSpecTask() {
+        Boilerplate.maybeCreate(project.configurations, 'restSpec') {
+            project.dependencies.add(
+                    'restSpec',
+                    ClasspathUtils.isElasticsearchProject(project) ? project.project(':rest-api-spec') :
+                            "org.elasticsearch:rest-api-spec:${VersionProperties.elasticsearch}"
+            )
+        }
+
+        return Boilerplate.maybeCreate(project.tasks, 'copyRestSpec', Copy) { Copy copy ->
+            copy.dependsOn project.configurations.restSpec
+            copy.into(project.sourceSets.test.output.resourcesDir)
+            copy.from({ project.zipTree(project.configurations.restSpec.singleFile) }) {
+                includeEmptyDirs = false
+                include 'rest-api-spec/**'
+                filesMatching('rest-api-spec/test/**') { FileCopyDetails details ->
+                    if (includePackaged == false) {
+                        details.exclude()
+                    }
+                }
+            }
+
+            if (project.plugins.hasPlugin(IdeaPlugin)) {
+                project.idea {
+                    module {
+                        if (scopes.TEST != null) {
+                            scopes.TEST.plus.add(project.configurations.restSpec)
+                        }
+                    }
+                }
             }
         }
     }

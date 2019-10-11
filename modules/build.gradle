@@ -17,7 +17,9 @@
  * under the License.
  */
 
-subprojects {
+configure(subprojects.findAll { it.parent.path == project.path }) {
+  group = 'org.elasticsearch.plugin' // for modules which publish client jars
+  apply plugin: 'elasticsearch.testclusters'       
   apply plugin: 'elasticsearch.esplugin'
 
   esplugin {
@@ -34,14 +36,4 @@ subprojects {
   if (project.file('src/main/config').exists()) {
     throw new InvalidModelException("Modules cannot contain config files") 
   }
-
-  project.afterEvaluate {
-    if (esplugin.isolated == false) {
-      throw new InvalidModelException("Modules cannot disable isolation")
-    }
-  }
-
-  // these are implementation details of our build, no need to publish them!
-  install.enabled = false
-  uploadArchives.enabled = false
 }

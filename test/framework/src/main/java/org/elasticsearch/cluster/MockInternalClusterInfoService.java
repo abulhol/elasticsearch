@@ -18,120 +18,80 @@
  */
 package org.elasticsearch.cluster;
 
-import org.elasticsearch.Version;
-import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.cluster.node.stats.NodeStats;
-import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsResponse;
-import org.elasticsearch.action.admin.cluster.node.stats.TransportNodesStatsAction;
-import org.elasticsearch.action.admin.indices.stats.IndicesStatsResponse;
-import org.elasticsearch.action.admin.indices.stats.TransportIndicesStatsAction;
+import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.ShardRouting;
-import org.elasticsearch.common.collect.ImmutableOpenMap;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.transport.DummyTransportAddress;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.monitor.fs.FsInfo;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import java.util.concurrent.CountDownLatch;
+import java.util.List;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
-/**
- * Fake ClusterInfoService class that allows updating the nodes stats disk
- * usage with fake values
- */
 public class MockInternalClusterInfoService extends InternalClusterInfoService {
 
-    public static class TestPlugin extends Plugin {
-        @Override
-        public String name() {
-            return "mock-cluster-info-service";
-        }
-        @Override
-        public String description() {
-            return "a mock cluster info service for testing";
-        }
-        public void onModule(ClusterModule module) {
-            module.clusterInfoServiceImpl = MockInternalClusterInfoService.class;
-        }
-    }
+    /** This is a marker plugin used to trigger MockNode to use this mock info service. */
+    public static class TestPlugin extends Plugin {}
 
-    private final ClusterName clusterName;
-    private volatile NodeStats[] stats = new NodeStats[3];
+    @Nullable // if no fakery should take place
+    public volatile Function<ShardRouting, Long> shardSizeFunction;
 
-    /** Create a fake NodeStats for the given node and usage */
-    public static NodeStats makeStats(String nodeName, DiskUsage usage) {
-        FsInfo.Path[] paths = new FsInfo.Path[1];
-        FsInfo.Path path = new FsInfo.Path("/dev/null", null,
-            usage.getTotalBytes(), usage.getFreeBytes(), usage.getFreeBytes());
-        paths[0] = path;
-        FsInfo fsInfo = new FsInfo(System.currentTimeMillis(), paths);
-        return new NodeStats(new DiscoveryNode(nodeName, DummyTransportAddress.INSTANCE, Version.CURRENT),
-            System.currentTimeMillis(),
-            null, null, null, null, null,
-            fsInfo,
-            null, null, null,
-            null, null);
-    }
+    @Nullable // if no fakery should take place
+    public volatile BiFunction<DiscoveryNode, FsInfo.Path, FsInfo.Path> diskUsageFunction;
 
-    @Inject
-    public MockInternalClusterInfoService(Settings settings, ClusterSettings clusterSettings,
-                                          TransportNodesStatsAction transportNodesStatsAction,
-                                          TransportIndicesStatsAction transportIndicesStatsAction,
-                                          ClusterService clusterService, ThreadPool threadPool) {
-        super(settings, clusterSettings, transportNodesStatsAction, transportIndicesStatsAction, clusterService, threadPool);
-        this.clusterName = ClusterName.clusterNameFromSettings(settings);
-        stats[0] = makeStats("node_t1", new DiskUsage("node_t1", "n1", "/dev/null", 100, 100));
-        stats[1] = makeStats("node_t2", new DiskUsage("node_t2", "n2", "/dev/null", 100, 100));
-        stats[2] = makeStats("node_t3", new DiskUsage("node_t3", "n3", "/dev/null", 100, 100));
-    }
-
-    public void setN1Usage(String nodeName, DiskUsage newUsage) {
-        stats[0] = makeStats(nodeName, newUsage);
-    }
-
-    public void setN2Usage(String nodeName, DiskUsage newUsage) {
-        stats[1] = makeStats(nodeName, newUsage);
-    }
-
-    public void setN3Usage(String nodeName, DiskUsage newUsage) {
-        stats[2] = makeStats(nodeName, newUsage);
-    }
-
-    @Override
-    public CountDownLatch updateNodeStats(final ActionListener<NodesStatsResponse> listener) {
-        NodesStatsResponse response = new NodesStatsResponse(clusterName, stats);
-        listener.onResponse(response);
-        return new CountDownLatch(0);
-    }
-
-    @Override
-    public CountDownLatch updateIndicesStats(final ActionListener<IndicesStatsResponse> listener) {
-        // Not used, so noop
-        return new CountDownLatch(0);
+    public MockInternalClusterInfoService(Settings settings, ClusterService clusterService, ThreadPool threadPool, NodeClient client) {
+        super(settings, clusterService, threadPool, client);
     }
 
     @Override
     public ClusterInfo getClusterInfo() {
-        ClusterInfo clusterInfo = super.getClusterInfo();
-        return new DevNullClusterInfo(clusterInfo.getNodeLeastAvailableDiskUsages(), clusterInfo.getNodeMostAvailableDiskUsages(), clusterInfo.shardSizes);
+        final ClusterInfo clusterInfo = super.getClusterInfo();
+        return new SizeFakingClusterInfo(clusterInfo);
     }
 
-    /**
-     * ClusterInfo that always points to DevNull.
-     */
-    public static class DevNullClusterInfo extends ClusterInfo {
-        public DevNullClusterInfo(ImmutableOpenMap<String, DiskUsage> leastAvailableSpaceUsage,
-            ImmutableOpenMap<String, DiskUsage> mostAvailableSpaceUsage, ImmutableOpenMap<String, Long> shardSizes) {
-            super(leastAvailableSpaceUsage, mostAvailableSpaceUsage, shardSizes, null);
+    @Override
+    List<NodeStats> adjustNodesStats(List<NodeStats> nodesStats) {
+        final BiFunction<DiscoveryNode, FsInfo.Path, FsInfo.Path> diskUsageFunction = this.diskUsageFunction;
+        if (diskUsageFunction == null) {
+            return nodesStats;
+        }
+
+        return nodesStats.stream().map(nodeStats -> {
+            final DiscoveryNode discoveryNode = nodeStats.getNode();
+            final FsInfo oldFsInfo = nodeStats.getFs();
+            return new NodeStats(discoveryNode, nodeStats.getTimestamp(), nodeStats.getIndices(), nodeStats.getOs(),
+                nodeStats.getProcess(), nodeStats.getJvm(), nodeStats.getThreadPool(), new FsInfo(oldFsInfo.getTimestamp(),
+                oldFsInfo.getIoStats(),
+                StreamSupport.stream(oldFsInfo.spliterator(), false)
+                    .map(fsInfoPath -> diskUsageFunction.apply(discoveryNode, fsInfoPath))
+                    .toArray(FsInfo.Path[]::new)), nodeStats.getTransport(),
+                nodeStats.getHttp(), nodeStats.getBreaker(), nodeStats.getScriptStats(), nodeStats.getDiscoveryStats(),
+                nodeStats.getIngestStats(), nodeStats.getAdaptiveSelectionStats());
+        }).collect(Collectors.toList());
+    }
+
+    class SizeFakingClusterInfo extends ClusterInfo {
+        SizeFakingClusterInfo(ClusterInfo delegate) {
+            super(delegate.getNodeLeastAvailableDiskUsages(), delegate.getNodeMostAvailableDiskUsages(),
+                delegate.shardSizes, delegate.routingToDataPath);
         }
 
         @Override
-        public String getDataPath(ShardRouting shardRouting) {
-            return "/dev/null";
+        public Long getShardSize(ShardRouting shardRouting) {
+            final Function<ShardRouting, Long> shardSizeFunction = MockInternalClusterInfoService.this.shardSizeFunction;
+            if (shardSizeFunction == null) {
+                return super.getShardSize(shardRouting);
+            }
+
+            return shardSizeFunction.apply(shardRouting);
         }
     }
 

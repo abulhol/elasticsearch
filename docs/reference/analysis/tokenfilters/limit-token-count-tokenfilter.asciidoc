@@ -16,17 +16,26 @@ is `false`.
 
 Here is an example:
 
-[source,js]
+[source,console]
 --------------------------------------------------
-index :
-    analysis :
-        analyzer :
-            myAnalyzer :
-                type : custom
-                tokenizer : standard
-                filter : [lowercase, five_token_limit]
-        filter :
-            five_token_limit :
-                type : limit
-                max_token_count : 5
+PUT /limit_example
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "limit_example": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "five_token_limit"]
+        }
+      },
+      "filter": {
+        "five_token_limit": {
+          "type": "limit",
+          "max_token_count": 5
+        }
+      }
+    }
+  }
+}
 --------------------------------------------------

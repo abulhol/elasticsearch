@@ -20,27 +20,41 @@ package org.elasticsearch.test;
 
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.settings.Setting;
-import org.elasticsearch.common.settings.SettingsModule;
+import org.elasticsearch.common.settings.Setting.Property;
+import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.index.IndexModule;
+import org.elasticsearch.index.IndexService;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.plugins.Plugin;
 
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
 public final class InternalSettingsPlugin extends Plugin {
-    @Override
-    public String name() {
-        return "internal-settings-plugin";
-    }
+
+    public static final Setting<String> PROVIDED_NAME_SETTING =
+        Setting.simpleString("index.provided_name",Property.IndexScope, Property.NodeScope);
+    public static final Setting<Boolean> MERGE_ENABLED =
+        Setting.boolSetting("index.merge.enabled", true, Property.IndexScope, Property.NodeScope);
+    public static final Setting<Long> INDEX_CREATION_DATE_SETTING =
+        Setting.longSetting(IndexMetaData.SETTING_CREATION_DATE, -1, -1, Property.IndexScope, Property.NodeScope);
+    public static final Setting<TimeValue> TRANSLOG_RETENTION_CHECK_INTERVAL_SETTING =
+        Setting.timeSetting("index.translog.retention.check_interval", new TimeValue(10, TimeUnit.MINUTES),
+            new TimeValue(-1, TimeUnit.MILLISECONDS), Property.Dynamic, Property.IndexScope);
 
     @Override
-    public String description() {
-        return "a plugin that allows to set values for internal settings which are can't be set via the ordinary API without this pluging installed";
-    }
-
-    public static final Setting<Integer> VERSION_CREATED = Setting.intSetting("index.version.created", 0, false, Setting.Scope.INDEX);
-    public static final Setting<Boolean> MERGE_ENABLED = Setting.boolSetting("index.merge.enabled", true, false, Setting.Scope.INDEX);
-    public static final Setting<Long> INDEX_CREATION_DATE_SETTING = Setting.longSetting(IndexMetaData.SETTING_CREATION_DATE, -1, -1, false, Setting.Scope.INDEX);
-
-    public void onModule(SettingsModule module) {
-        module.registerSetting(VERSION_CREATED);
-        module.registerSetting(MERGE_ENABLED);
-        module.registerSetting(INDEX_CREATION_DATE_SETTING);
+    public List<Setting<?>> getSettings() {
+        return Arrays.asList(
+                MERGE_ENABLED,
+                INDEX_CREATION_DATE_SETTING,
+                PROVIDED_NAME_SETTING,
+                TRANSLOG_RETENTION_CHECK_INTERVAL_SETTING,
+                IndexService.GLOBAL_CHECKPOINT_SYNC_INTERVAL_SETTING,
+                IndexService.RETENTION_LEASE_SYNC_INTERVAL_SETTING,
+                IndexSettings.FILE_BASED_RECOVERY_THRESHOLD_SETTING,
+                IndexModule.INDEX_QUERY_CACHE_EVERYTHING_SETTING,
+                IndexSettings.INDEX_TRANSLOG_RETENTION_TOTAL_FILES_SETTING
+            );
     }
 }

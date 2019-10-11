@@ -1,5 +1,5 @@
 [[modules-cluster]]
-== Cluster
+== Shard allocation and cluster-level routing
 
 One of the main roles of the master is to decide which shards to allocate to
 which nodes, and when to move shards between nodes in order to rebalance the
@@ -7,7 +7,7 @@ cluster.
 
 There are a number of settings available to control the shard allocation process:
 
-*   <<shards-allocation>> lists the settings to control the allocation an
+*   <<shards-allocation>> lists the settings to control the allocation and
     rebalancing operations.
 
 *   <<disk-allocator>> explains how Elasticsearch takes available disk space
